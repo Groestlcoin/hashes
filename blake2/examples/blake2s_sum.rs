@@ -1,5 +1,3 @@
-extern crate blake2;
-
 use blake2::{Blake2s, Digest};
 use std::env;
 use std::fs;
@@ -25,12 +23,12 @@ fn process<D: Digest + Default, R: Read>(reader: &mut R, name: &str) {
             Ok(n) => n,
             Err(_) => return,
         };
-        sh.input(&buffer[..n]);
+        sh.update(&buffer[..n]);
         if n == 0 || n < BUFFER_SIZE {
             break;
         }
     }
-    print_result(&sh.result(), name);
+    print_result(&sh.finalize(), name);
 }
 
 fn main() {

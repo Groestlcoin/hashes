@@ -1,6 +1,4 @@
-extern crate md2;
-
-use md2::{Md2, Digest};
+use md2::{Digest, Md2};
 use std::env;
 use std::fs;
 use std::io::{self, Read};
@@ -17,12 +15,12 @@ fn process<R: Read>(reader: &mut R, name: &str) {
             Ok(n) => n,
             Err(_) => return,
         };
-        sh.input(&buffer[..n]);
+        sh.update(&buffer[..n]);
         if n == 0 || n < BUFFER_SIZE {
             break;
         }
     }
-    println!("{:x}\t{}", &sh.result(), name);
+    println!("{:x}\t{}", &sh.finalize(), name);
 }
 
 fn main() {

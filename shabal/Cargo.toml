@@ -1,0 +1,25 @@
+[package]
+name = "shabal"
+version = "0.3.0-pre"
+description = "Shabal hash functions"
+authors = ["RustCrypto Developers"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+edition = "2018"
+documentation = "https://docs.rs/shabal"
+repository = "https://github.com/RustCrypto/hashes"
+keywords = ["crypto", "shabal", "hash", "digest"]
+categories = ["cryptography", "no-std"]
+
+[dependencies]
+digest = "0.9"
+block-buffer = { version = "0.9", features = ["block-padding"] }
+opaque-debug = "0.3"
+
+[dev-dependencies]
+digest = { version = "0.9", features = ["dev"] }
+hex-literal = "0.2"
+
+[features]
+default = ["std"]
+std = ["digest/std"]

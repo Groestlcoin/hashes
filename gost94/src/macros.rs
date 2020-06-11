@@ -1,45 +1,48 @@
 macro_rules! gost94_impl {
     ($state:ident, $sbox:expr) => {
+        use digest::{consts::U32, BlockInput, FixedOutputDirty, Reset, Update};
+        use $crate::gost94::{Block, Gost94, SBox};
 
-    use $crate::gost94::{Gost94, SBox, Block};
-    use digest;
-    use digest::generic_array::GenericArray;
-    use digest::generic_array::typenum::U32;
-
-    #[derive(Clone)]
-    pub struct $state {
-        sh: Gost94
-    }
-
-    impl $state {
-        pub fn new() -> Self {
-            $state{sh: Gost94::new($sbox, Block::default())}
+        /// GOST94 state
+        #[derive(Clone)]
+        pub struct $state {
+            sh: Gost94,
         }
-    }
 
-    impl Default for $state {
-        fn default() -> Self {
-            Self::new()
+        impl Default for $state {
+            fn default() -> Self {
+                $state {
+                    sh: Gost94::new($sbox, Block::default()),
+                }
+            }
         }
-    }
 
-    impl digest::BlockInput for $state {
-        type BlockSize = U32;
-    }
-
-    impl digest::Input for $state {
-        fn process(&mut self, input: &[u8]) {
-            self.sh.process(input);
+        impl BlockInput for $state {
+            type BlockSize = U32;
         }
-    }
 
-    impl digest::FixedOutput for $state {
-        type OutputSize = U32;
-
-        fn fixed_result(self) -> GenericArray<u8, Self::OutputSize> {
-            self.sh.fixed_result()
+        impl Update for $state {
+            fn update(&mut self, input: impl AsRef<[u8]>) {
+                let input = input.as_ref();
+                self.sh.update(input);
+            }
         }
-    }
 
-    impl_opaque_debug!($state);
-}}
+        impl FixedOutputDirty for $state {
+            type OutputSize = U32;
+
+            fn finalize_into_dirty(&mut self, out: &mut digest::Output<Self>) {
+                self.sh.finalize_into_dirty(out)
+            }
+        }
+
+        impl Reset for $state {
+            fn reset(&mut self) {
+                self.sh.reset()
+            }
+        }
+
+        opaque_debug::implement!($state);
+        digest::impl_write!($state);
+    };
+}

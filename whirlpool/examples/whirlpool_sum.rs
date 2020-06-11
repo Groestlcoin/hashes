@@ -1,9 +1,7 @@
-extern crate whirlpool;
-
-use whirlpool::{Whirlpool, Digest};
 use std::env;
 use std::fs;
 use std::io::{self, Read};
+use whirlpool::{Digest, Whirlpool};
 
 const BUFFER_SIZE: usize = 1024;
 
@@ -25,12 +23,12 @@ fn process<D: Digest + Default, R: Read>(reader: &mut R, name: &str) {
             Ok(n) => n,
             Err(_) => return,
         };
-        sh.input(&buffer[..n]);
+        sh.update(&buffer[..n]);
         if n == 0 || n < BUFFER_SIZE {
             break;
         }
     }
-    print_result(&sh.result(), name);
+    print_result(&sh.finalize(), name);
 }
 
 fn main() {

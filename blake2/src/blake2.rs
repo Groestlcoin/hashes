@@ -1,26 +1,33 @@
 macro_rules! blake2_impl {
-    ($state:ident, $word:ident, $vec:ident, $bytes:ident,
-     $R1:expr, $R2:expr, $R3:expr, $R4:expr, $IV:expr) => {
+    (
+        $state:ident, $fix_state:ident, $word:ident, $vec:ident, $bytes:ident,
+        $block_size:ident, $R1:expr, $R2:expr, $R3:expr, $R4:expr, $IV:expr,
+        $vardoc:expr, $doc:expr,
+    ) => {
 
         use $crate::as_bytes::AsBytes;
         use $crate::simd::{Vector4, $vec};
 
+        use digest::{Update, BlockInput, FixedOutputDirty, VariableOutputDirty, Reset};
+        use digest::InvalidOutputSize;
         use digest::generic_array::GenericArray;
-        use digest::generic_array::typenum::Unsigned;
-        use core::cmp;
-        use byte_tools::{copy_memory, zero};
-        use digest;
-        use crypto_mac::{Mac, MacResult, InvalidKeyLength};
+        use digest::generic_array::typenum::{U4, Unsigned};
+        use core::{cmp, convert::TryInto, ops::Div};
+        use crypto_mac::{InvalidKeyLength, Mac, NewMac};
 
         type Output = GenericArray<u8, $bytes>;
 
-        /// Hash function context.
         #[derive(Clone)]
+        #[doc=$vardoc]
         pub struct $state {
             m: [$word; 16],
             h: [$vec; 2],
             t: u64,
             n: usize,
+
+            h0: [$vec; 2],
+            m0: [$word; 16],
+            t0: u64,
         }
 
         #[inline(always)]
@@ -67,24 +74,65 @@ macro_rules! blake2_impl {
 
         impl $state {
             /// Creates a new hashing context with a key.
-            pub fn new_keyed(k: &[u8], output_size: usize) -> Self {
-                let kk = k.len();
+            ///
+            /// **WARNING!** If you plan to use it for variable output MAC, then
+            /// make sure to compare codes in constant time! It can be done
+            /// for example by using `subtle` crate.
+            pub fn new_keyed(key: &[u8], output_size: usize) -> Self {
+                Self::with_params(key, &[], &[], output_size)
+            }
+
+            /// Creates a new hashing context with the full set of sequential-mode parameters.
+            pub fn with_params(key: &[u8], salt: &[u8], persona: &[u8], output_size: usize) -> Self {
+                let kk = key.len();
                 assert!(kk <= $bytes::to_usize());
                 assert!(output_size <= $bytes::to_usize());
 
-                let p0 = 0x0101_0000 ^ ((kk as $word) << 8) ^
+                // The number of bytes needed to express two words.
+                let length = $bytes::to_usize()/4;
+                assert!(salt.len() <= length);
+                assert!(persona.len() <= length);
+
+                // Build a parameter block
+                let mut p = [0 as $word; 8];
+                p[0] = 0x0101_0000 ^ ((kk as $word) << 8) ^
                     (output_size as $word);
-                let mut state = $state {
-                    m: [0; 16],
-                    h: [iv0() ^ $vec::new(p0, 0, 0, 0), iv1()],
-                    t: 0,
-                    n: output_size,
-                };
+
+                // salt is two words long
+                if salt.len() < length {
+                    let mut padded_salt = GenericArray::<u8, <$bytes as Div<U4>>::Output>::default();
+                    for i in 0..salt.len() {
+                        padded_salt[i] = salt[i];
+                    }
+                    p[4] = $word::from_le_bytes(padded_salt[0 .. length/2].try_into().unwrap());
+                    p[5] = $word::from_le_bytes(padded_salt[length/2 .. padded_salt.len()].try_into().unwrap());
+                } else {
+                    p[4] = $word::from_le_bytes(salt[0 .. salt.len()/2].try_into().unwrap());
+                    p[5] = $word::from_le_bytes(salt[salt.len()/2 .. salt.len()].try_into().unwrap());
+                }
+
+                // persona is also two words long
+                if persona.len() < length {
+                    let mut padded_persona = GenericArray::<u8, <$bytes as Div<U4>>::Output>::default();
+                    for i in 0..persona.len() {
+                        padded_persona[i] = persona[i];
+                    }
+                    p[6] = $word::from_le_bytes(padded_persona[0 .. length/2].try_into().unwrap());
+                    p[7] = $word::from_le_bytes(padded_persona[length/2 .. padded_persona.len()].try_into().unwrap());
+                } else {
+                    p[6] = $word::from_le_bytes(persona[0 .. length/2].try_into().unwrap());
+                    p[7] = $word::from_le_bytes(persona[length/2 .. persona.len()].try_into().unwrap());
+                }
+
+                let mut state = Self::with_parameter_block(&p);
 
                 if kk > 0 {
-                    copy_memory(k, state.m.as_mut_bytes());
+                    copy(key, state.m.as_mut_bytes());
                     state.t = 2 * $bytes::to_u64();
                 }
+
+                state.t0 = state.t;
+                state.m0 = state.m;
                 state
             }
 
@@ -95,12 +143,20 @@ macro_rules! blake2_impl {
                 assert!(nn >= 1 && nn <= $bytes::to_usize());
                 assert!(kk <= $bytes::to_usize());
 
+                let h0 = [
+                    iv0() ^ $vec::new(p[0], p[1], p[2], p[3]),
+                    iv1() ^ $vec::new(p[4], p[5], p[6], p[7]),
+                ];
+
                 $state {
                     m: [0; 16],
-                    h: [iv0() ^ $vec::new(p[0], p[1], p[2], p[3]),
-                        iv1() ^ $vec::new(p[4], p[5], p[6], p[7])],
+                    h: h0,
                     t: 0,
                     n: nn,
+
+                    t0: 0,
+                    m0: [0; 16],
+                    h0: h0,
                 }
             }
 
@@ -117,7 +173,7 @@ macro_rules! blake2_impl {
                     let part = &rest[..len];
                     rest = &rest[part.len()..];
 
-                    copy_memory(part, &mut self.m.as_mut_bytes()[off..]);
+                    copy(part, &mut self.m.as_mut_bytes()[off..]);
                     self.t = self.t.checked_add(part.len() as u64)
                         .expect("hash data length overflow");
                 }
@@ -128,7 +184,7 @@ macro_rules! blake2_impl {
                     let part = &rest[..block];
                     rest = &rest[part.len()..];
 
-                    copy_memory(part, &mut self.m.as_mut_bytes());
+                    copy(part, &mut self.m.as_mut_bytes());
                     self.t = self.t.checked_add(part.len() as u64)
                         .expect("hash data length overflow");
                 }
@@ -137,22 +193,22 @@ macro_rules! blake2_impl {
                 if n > 0 {
                     self.compress(0, 0);
 
-                    copy_memory(rest, &mut self.m.as_mut_bytes());
+                    copy(rest, &mut self.m.as_mut_bytes());
                     self.t = self.t.checked_add(rest.len() as u64)
                         .expect("hash data length overflow");
                 }
             }
 
             #[doc(hidden)]
-            pub fn finalize_last_node(self) -> Output {
+            pub fn finalize_last_node(mut self) -> Output {
                 self.finalize_with_flag(!0)
             }
 
 
-            fn finalize_with_flag(mut self, f1: $word) -> Output {
+            fn finalize_with_flag(&mut self, f1: $word) -> Output {
                 let off = self.t as usize % (2 * $bytes::to_usize());
                 if off != 0 {
-                    zero(&mut self.m.as_mut_bytes()[off..]);
+                    self.m.as_mut_bytes()[off..].iter_mut().for_each(|b| *b = 0);
                 }
 
                 self.compress(!0, f1);
@@ -160,7 +216,7 @@ macro_rules! blake2_impl {
                 let buf = [self.h[0].to_le(), self.h[1].to_le()];
 
                 let mut out = GenericArray::default();
-                copy_memory(buf.as_bytes(), &mut out);
+                copy(buf.as_bytes(), &mut out);
                 out
             }
 
@@ -204,32 +260,24 @@ macro_rules! blake2_impl {
             }
         }
 
-
         impl Default for $state {
             fn default() -> Self { Self::new_keyed(&[], $bytes::to_usize()) }
         }
 
-        impl digest::BlockInput for $state {
-            type BlockSize = $bytes;
+        impl BlockInput for $state {
+            type BlockSize = $block_size;
         }
 
-        impl digest::Input for $state {
-            fn process(&mut self, input: &[u8]) { self.update(input); }
-        }
-
-        impl digest::FixedOutput for $state {
-            type OutputSize = $bytes;
-
-            fn fixed_result(self) -> Output {
-                assert_eq!(self.n, $bytes::to_usize());
-                self.finalize_with_flag(0)
+        impl Update for $state {
+            fn update(&mut self, data: impl AsRef<[u8]>) {
+                self.update(data.as_ref());
             }
         }
 
-        impl digest::VariableOutput for $state {
-            fn new(output_size: usize) -> Result<Self, digest::InvalidLength> {
+        impl VariableOutputDirty for $state {
+            fn new(output_size: usize) -> Result<Self, InvalidOutputSize> {
                 if output_size == 0 || output_size > $bytes::to_usize() {
-                    return Err(digest::InvalidLength);
+                    return Err(InvalidOutputSize);
                 }
                 Ok(Self::new_keyed(&[], output_size))
             }
@@ -238,39 +286,110 @@ macro_rules! blake2_impl {
                 self.n
             }
 
-            fn variable_result(self, buf: &mut [u8])
-                                    -> Result<&[u8], digest::InvalidLength>
-            {
-                let n = buf.len();
-                if n > self.output_size() {
-                    Err(digest::InvalidLength)
-                } else {
-                    let res = self.finalize_with_flag(0);
-                    copy_memory(&res[..n], buf);
-                    Ok(buf)
-                }
+            fn finalize_variable_dirty(&mut self, f: impl FnOnce(&[u8])) {
+                let n = self.n;
+                let res = self.finalize_with_flag(0);
+                f(&res[..n]);
             }
         }
 
-        impl Mac for $state {
+        impl Reset for $state {
+            fn reset(&mut self) {
+                self.t = self.t0;
+                self.m = self.m0;
+                self.h = self.h0;
+            }
+        }
+
+        opaque_debug::implement!($state);
+        digest::impl_write!($state);
+
+
+        #[derive(Clone)]
+        #[doc=$doc]
+        pub struct $fix_state {
+            state: $state,
+        }
+
+        impl $fix_state {
+            /// Creates a new hashing context with the full set of sequential-mode parameters.
+            pub fn with_params(key: &[u8], salt: &[u8], persona: &[u8]) -> Self {
+                let state = $state::with_params(key, salt, persona, $bytes::to_usize());
+                Self { state }
+            }
+        }
+
+        impl Default for $fix_state {
+            fn default() -> Self {
+                let state = $state::new_keyed(&[], $bytes::to_usize());
+                Self { state }
+            }
+        }
+
+        impl BlockInput for $fix_state {
+            type BlockSize = $block_size;
+        }
+
+        impl Update for $fix_state {
+            fn update(&mut self, data: impl AsRef<[u8]>) {
+                self.state.update(data.as_ref());
+            }
+        }
+
+        impl FixedOutputDirty for $fix_state {
             type OutputSize = $bytes;
 
-            fn new(key: &[u8]) -> Result<Self, InvalidKeyLength> {
+            fn finalize_into_dirty(&mut self, out: &mut Output)  {
+                out.copy_from_slice(&self.state.finalize_with_flag(0));
+            }
+        }
+
+        impl Reset for $fix_state {
+            fn reset(&mut self) {
+                self.state.reset()
+            }
+        }
+
+        impl NewMac for $fix_state {
+            type KeySize = $bytes;
+
+            fn new(key: &GenericArray<u8, $bytes>) -> Self {
+                let state = $state::new_keyed(key, $bytes::to_usize());
+                Self { state }
+            }
+
+            fn new_varkey(key: &[u8]) -> Result<Self, InvalidKeyLength> {
                 if key.len() > $bytes::to_usize() {
                     Err(InvalidKeyLength)
                 } else {
-                    Ok(Self::new_keyed(key, $bytes::to_usize()))
+                    let state = $state::new_keyed(key, $bytes::to_usize());
+                    Ok(Self { state })
                 }
-            }
-
-            fn input(&mut self, data: &[u8]) { self.update(data); }
-
-            fn result(self) -> MacResult<Self::OutputSize> {
-                MacResult::new(self.finalize_with_flag(0))
             }
         }
 
-        impl_opaque_debug!($state);
+        impl Mac for $fix_state {
+            type OutputSize = $bytes;
 
+            fn update(&mut self, data: &[u8]) { self.state.update(data); }
+
+            fn reset(&mut self) {
+                <Self as Reset>::reset(self)
+            }
+
+            fn finalize(mut self) -> crypto_mac::Output<Self> {
+                crypto_mac::Output::new(self.state.finalize_with_flag(0))
+            }
+        }
+
+        opaque_debug::implement!($fix_state);
+        digest::impl_write!($fix_state);
+
+        fn copy(src: &[u8], dst: &mut [u8]) {
+            assert!(dst.len() >= src.len());
+            unsafe {
+                core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), src.len());
+            }
+        }
     }
 }

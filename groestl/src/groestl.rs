@@ -1,17 +1,16 @@
-use core::ops::Div;
-
-use digest;
 use block_buffer::BlockBuffer;
-use digest::generic_array::{ArrayLength, GenericArray};
+use core::ops::Div;
 use digest::generic_array::typenum::{Quot, U8};
+use digest::generic_array::{ArrayLength, GenericArray};
 
-use state::{GroestlState, xor_generic_array};
+use crate::state::{xor_generic_array, GroestlState};
 
 #[derive(Clone)]
 pub struct Groestl<BlockSize>
-    where BlockSize: ArrayLength<u8> + Div<U8> + Default,
-          BlockSize::ArrayType: Copy,
-          Quot<BlockSize, U8>: ArrayLength<u8>,
+where
+    BlockSize: ArrayLength<u8> + Div<U8> + Default,
+    BlockSize::ArrayType: Copy,
+    Quot<BlockSize, U8>: ArrayLength<u8>,
 {
     buffer: BlockBuffer<BlockSize>,
     state: GroestlState<BlockSize>,
@@ -19,50 +18,59 @@ pub struct Groestl<BlockSize>
 }
 
 impl<BlockSize> Groestl<BlockSize>
-    where BlockSize: ArrayLength<u8> + Div<U8> + Default,
-          BlockSize::ArrayType: Copy,
-          Quot<BlockSize, U8>: ArrayLength<u8>,
+where
+    BlockSize: ArrayLength<u8> + Div<U8> + Default,
+    BlockSize::ArrayType: Copy,
+    Quot<BlockSize, U8>: ArrayLength<u8>,
+    Self: Clone,
 {
-    pub fn new(output_size: usize) -> Result<Self, digest::InvalidLength> {
+    pub fn new(output_size: usize) -> Result<Self, digest::InvalidOutputSize> {
         match BlockSize::to_usize() {
             128 => {
                 if output_size <= 32 || output_size > 64 {
-                    return Err(digest::InvalidLength);
+                    return Err(digest::InvalidOutputSize);
                 }
-            },
+            }
             64 => {
                 if output_size == 0 || output_size > 32 {
-                    return Err(digest::InvalidLength);
+                    return Err(digest::InvalidOutputSize);
                 }
-            },
+            }
             _ => unreachable!(),
         };
 
-        Ok(Groestl{
+        let state = GroestlState::new(output_size);
+        Ok(Groestl {
             buffer: Default::default(),
-            state: GroestlState::new(output_size),
-            output_size: output_size
+            state,
+            output_size,
         })
     }
 
     pub fn process(&mut self, input: &[u8]) {
-        let state = &mut self.state;
-        self.buffer.input(
-            input,
-            |b: &GenericArray<u8, BlockSize>| { state.compress(b); },
-        );
+        let s = &mut self.state;
+        self.buffer.input_block(input, |b| s.compress(b));
     }
 
-    pub fn finalize(mut self) -> GenericArray<u8, BlockSize> {
-        let state = &mut self.state;
-        let l = if self.buffer.remaining() <= 8 {
-            state.num_blocks + 2
-        } else {
-            state.num_blocks + 1
+    pub fn finalize(&mut self) -> GenericArray<u8, BlockSize> {
+        let res = {
+            let state = &mut self.state;
+            let l = if self.buffer.remaining() <= 8 {
+                state.num_blocks + 2
+            } else {
+                state.num_blocks + 1
+            };
+            self.buffer.len64_padding_be(l, |b| state.compress(b));
+            xor_generic_array(&state.p(&state.state), &state.state)
         };
-        // remove this mess by adding `len_padding_be` method
-        let l = if cfg!(target_endian = "little") { l.to_be() } else { l.to_le() };
-        self.buffer.len_padding(l, |b| state.compress(b));
-        xor_generic_array(&state.p(&state.state), &state.state)
+
+        self.buffer = Default::default();
+        self.state = GroestlState::new(self.output_size);
+        res
+    }
+
+    pub fn reset(&mut self) {
+        self.state = GroestlState::new(self.output_size);
+        self.buffer.reset();
     }
 }
